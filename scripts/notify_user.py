@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-Notify the main session user via the local OpenClaw gateway (chat.send RPC).
+Notify the main session user via the local OpenClaw gateway.
 
-Sends a structured signal to the main session. The main session reads the
-meeting state and outputs the formatted message as an assistant bubble.
+Sends a structured signal to the main session via chat.send (webchat).
+The signal encodes the meeting id, event type, and optional channel/target
+so the main session can route the formatted notification to the correct channel.
 
 Usage:
   notify_user.py --state /path/to/mtg-<id>.json --event consensus
-  notify_user.py --state /path/to/mtg-<id>.json --event confirmed
-  notify_user.py --state /path/to/mtg-<id>.json --event "escalation:stalled"
 
 Events:
   consensus              All participants agreed on a slot
   confirmed              Final confirmation emails sent
   escalation:<reason>    Negotiation needs organizer intervention
 
-The signal format sent to main session: __MEETING_NOTIFY__:<id>:<event>
-The main session handles this signal and outputs the formatted assistant message.
+Signal format sent to main session:
+  __MEETING_NOTIFY__:<id>:<event>
+  __MEETING_NOTIFY__:<id>:<event>:notify_channel=<channel>:notify_target=<target>
+
+The main session receives the signal, reads the state file, formats the message
+per ux-copy.md, and sends it to the user via the appropriate channel.
 """
 
 import argparse
@@ -33,19 +36,16 @@ def load_config():
         return json.load(f)
 
 
-def send_signal(meeting_id: str, event: str, session_key: str = "agent:main:main") -> bool:
-    """Send a structured signal to the main session via gateway chat.send."""
+def send_signal(signal: str, session_key: str = "agent:main:main") -> bool:
+    """Send signal to main session via gateway chat.send."""
     config = load_config()
     gw = config.get("gateway", {})
     token = gw.get("auth", {}).get("token", "")
 
-    signal = f"__MEETING_NOTIFY__:{meeting_id}:{event}"
-    idempotency_key = str(uuid.uuid4())
-
     params = {
         "sessionKey": session_key,
         "message": signal,
-        "idempotencyKey": idempotency_key,
+        "idempotencyKey": str(uuid.uuid4()),
     }
 
     cmd = [
@@ -59,7 +59,7 @@ def send_signal(meeting_id: str, event: str, session_key: str = "agent:main:main
             print(f"[notify_user] ✅ Signal sent: {signal}", file=sys.stderr)
             return True
         else:
-            print(f"[notify_user] ❌ Failed: {result.stderr.strip()}", file=sys.stderr)
+            print(f"[notify_user] ❌ chat.send failed: {result.stderr.strip()}", file=sys.stderr)
             return False
     except Exception as e:
         print(f"[notify_user] ❌ Error: {e}", file=sys.stderr)
@@ -67,7 +67,7 @@ def send_signal(meeting_id: str, event: str, session_key: str = "agent:main:main
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Notify the main session via structured signal.")
+    parser = argparse.ArgumentParser(description="Notify the user via structured signal.")
     parser.add_argument("--state", required=True, help="Meeting state file path")
     parser.add_argument("--event", required=True,
                         help="Event type: consensus | confirmed | escalation:<reason>")
@@ -86,8 +86,16 @@ def main():
         print(f"[notify_user] ❌ Failed to read state file: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Build signal — include channel/target from state if available
+    notify_channel = state.get("notify_channel", "")
+    notify_target = state.get("notify_target", "")
+
+    signal = f"__MEETING_NOTIFY__:{meeting_id}:{args.event}"
+    if notify_channel and notify_target:
+        signal += f":notify_channel={notify_channel}:notify_target={notify_target}"
+
     print(f"[notify_user] Meeting: {meeting_id}, event: {args.event}", file=sys.stderr)
-    ok = send_signal(meeting_id, args.event, session_key=args.session)
+    ok = send_signal(signal, session_key=args.session)
     sys.exit(0 if ok else 1)
 
 

@@ -59,7 +59,20 @@ Collect all required fields before drafting anything. Ask only for what's missin
 | `timezone` | ✅ | Detect from user profile; confirm if cross-timezone |
 | `description` | ❌ | Optional agenda |
 | `proposed_slots` | auto | Generated based on time range (see rules below) |
+| `notify_channel` | auto | Channel the user is currently on (e.g. "telegram", "whatsapp"). Store at Phase 1 so notifications are routed back to the correct channel. |
+| `notify_target` | auto | Channel-specific target (e.g. Telegram chatId). Store at Phase 1. |
 
+**Detecting notify_channel and notify_target:**
+Read from the inbound message metadata (available in system context). Examples:
+- Telegram DM → `notify_channel: "telegram"`, `notify_target: "<chatId>"`
+- WhatsApp → `notify_channel: "whatsapp"`, `notify_target: "<e164_number>"`
+- webchat/CLI → leave both empty (main session will reply inline)
+
+Store immediately after creating the meeting state:
+```bash
+python3 <skill_dir>/scripts/meeting_state.py update <id> \
+  '{"notify_channel": "<channel>", "notify_target": "<target>"}'
+```
 
 **Slot generation rules:**
 ```
