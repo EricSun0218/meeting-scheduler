@@ -37,16 +37,20 @@ def run(cmd):
         return False, "", str(e)
 
 
-def check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids=None, participant_email="", subject=""):
-    """Fetch ALL new emails from participant since last_sent_at.
+def check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids=None, participant_email="", subject="", since_str=None):
+    """Fetch new emails from participant since `since_str` (last_polled_at).
     No subject filtering — LLM will decide if emails are meeting-related.
+    Falls back to last_sent_at if since_str not provided.
     """
-    last_sent = parse_iso(last_sent_at_str)
-    last_utc = last_sent.astimezone(timezone.utc) if last_sent else None
+    cutoff = parse_iso(since_str) or parse_iso(last_sent_at_str)
+    last_utc = cutoff.astimezone(timezone.utc) if cutoff else None
     processed_ids = processed_ids or []
 
-    # Fetch all emails from this participant, no subject filter
+    # Use Gmail after: filter to reduce API results to genuinely new emails
+    after_ts = int(last_utc.timestamp()) if last_utc else None
     query = f'from:{participant_email}'
+    if after_ts:
+        query += f' after:{after_ts}'
     cmd = ["gog", "gmail", "messages", "search", "--account", organizer, query, "--json"]
     log(f"  gog command: {' '.join(cmd)}")
     ok, out, err = run(cmd)
@@ -94,11 +98,13 @@ def check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids=None,
     return new_messages
 
 
-def check_thread_himalaya(participant_email, subject, last_sent_at_str, organizer, processed_ids=None):
-    """Fetch ALL new emails from participant since last_sent_at via himalaya.
+def check_thread_himalaya(participant_email, subject, last_sent_at_str, organizer, processed_ids=None, since_str=None):
+    """Fetch new emails from participant since `since_str` (last_polled_at) via himalaya.
     No subject filtering — LLM will decide if emails are meeting-related.
+    Falls back to last_sent_at if since_str not provided.
     """
-    last_sent = parse_iso(last_sent_at_str)
+    cutoff = parse_iso(since_str) or parse_iso(last_sent_at_str)
+    last_sent = cutoff
     # Fetch all emails from this participant, no subject filter
     cmd = ["himalaya", "envelope", "list", "--query", f"FROM {participant_email}", "--output", "json"]
     log(f"  himalaya command: {' '.join(cmd)}")
@@ -151,11 +157,11 @@ def check_thread_himalaya(participant_email, subject, last_sent_at_str, organize
     return new_messages
 
 
-def check_thread(thread_id, last_sent_at_str, organizer, email_tool, participant_email="", subject="", processed_ids=None):
+def check_thread(thread_id, last_sent_at_str, organizer, email_tool, participant_email="", subject="", processed_ids=None, since_str=None):
     """Dispatch to the right email tool."""
     if email_tool == "himalaya":
-        return check_thread_himalaya(participant_email, subject, last_sent_at_str, organizer, processed_ids)
-    return check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids, participant_email=participant_email, subject=subject)
+        return check_thread_himalaya(participant_email, subject, last_sent_at_str, organizer, processed_ids, since_str=since_str)
+    return check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids, participant_email=participant_email, subject=subject, since_str=since_str)
 
 
 def get_future_slots(proposed_slots, now):
@@ -205,13 +211,14 @@ def _set_poll_busy(state_path):
 
 
 def _clear_poll_busy(state_path):
-    """Clear poll_busy flag when no action is needed.
+    """Clear poll_busy flag and update last_polled_at when no action is needed.
     Uses atomic write to prevent corruption on crash."""
     try:
         with open(state_path) as f:
             state = json.load(f)
         state["poll_busy"] = False
         state["poll_busy_since"] = None
+        state["last_polled_at"] = datetime.now(timezone.utc).isoformat()
         atomic_write_json(state_path, state)
     except Exception as e:
         log(f"  warning: failed to clear poll_busy: {e}")
@@ -277,9 +284,10 @@ def main():
     subject = state.get("subject", "")
     proposed_slots = state.get("proposed_slots", [])
     pending_replies = list(state.get("pending_replies", []))
+    last_polled_at = state.get("last_polled_at", "")
     now_utc = datetime.now(timezone.utc)
 
-    log(f"[{meeting_id}] starting poll check (email_tool={email_tool}, organizer={organizer})")
+    log(f"[{meeting_id}] starting poll check (email_tool={email_tool}, organizer={organizer}, last_polled_at={last_polled_at or 'never'})")
     log(f"[{meeting_id}] proposed_slots: {proposed_slots}")
 
     future_slots = get_future_slots(proposed_slots, now_utc)
@@ -306,6 +314,7 @@ def main():
             organizer=organizer,
             email_tool=email_tool,
             participant_email=email,
+            since_str=last_polled_at or last_sent_at,
             subject=subject,
             processed_ids=processed_ids,
         )
