@@ -161,8 +161,7 @@ Show the invite draft to the user for review following the template in [referenc
    python3 <skill_dir>/scripts/meeting_state.py update <id> '{"poll_task_id": "<returned jobId>"}'
    ```
 
-2. **Then — spawn a sub-agent** to send the invites → **immediately return control to main session**
-   Tell user: "邀请邮件正在后台发送，轮询已启动，有回复时将自动通知。"
+2. **Then — spawn a sub-agent** to send the invites. Wait for the sub-agent to complete — it will output the Node 3 message. Do NOT say anything to the user before the sub-agent completes.
 
 **Sub-agent task (send invites only, runs in background):**
 
