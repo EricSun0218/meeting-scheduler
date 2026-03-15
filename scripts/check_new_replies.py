@@ -38,17 +38,15 @@ def run(cmd):
 
 
 def check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids=None, participant_email="", subject=""):
-    """Check Gmail for replies via search (handles broken thread chains from non-Gmail clients).
-    Falls back gracefully when thread get returns 0 messages (e.g. QQ Mail breaks thread association).
-    Strategy: search by sender + subject keywords, filter by date > last_sent_at.
+    """Fetch ALL new emails from participant since last_sent_at.
+    No subject filtering — LLM will decide if emails are meeting-related.
     """
     last_sent = parse_iso(last_sent_at_str)
     last_utc = last_sent.astimezone(timezone.utc) if last_sent else None
     processed_ids = processed_ids or []
 
-    # Build search query: sender + subject (strip common prefixes for broader match)
-    subject_kw = subject.replace("会议邀请：", "").replace("Re: ", "").strip()
-    query = f'from:{participant_email} subject:"{subject_kw}"'
+    # Fetch all emails from this participant, no subject filter
+    query = f'from:{participant_email}'
     cmd = ["gog", "gmail", "messages", "search", "--account", organizer, query, "--json"]
     log(f"  gog command: {' '.join(cmd)}")
     ok, out, err = run(cmd)
@@ -82,22 +80,26 @@ def check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids=None,
             continue
         msg_utc = msg_date.astimezone(timezone.utc)
         if last_utc and msg_utc <= last_utc:
-            log(f"  msg from={from_field}, msg_utc={msg_utc.isoformat()} <= last_utc={last_utc.isoformat()} → SKIP (old)")
+            log(f"  msg from={from_field}, msg_utc={msg_utc.isoformat()} <= last_utc → SKIP (old)")
             continue
-        log(f"  msg from={from_field}, msg_utc={msg_utc.isoformat()} → NEW")
+        log(f"  msg from={from_field}, subject={msg.get('subject', '')} → NEW (LLM will judge relevance)")
         new_messages.append({
             "message_id": msg_id,
             "date": msg.get("date", ""),
             "from": from_field,
-            "snippet": msg.get("snippet", "") or msg.get("subject", ""),
+            "subject": msg.get("subject", ""),
+            "snippet": msg.get("snippet", ""),
         })
-    log(f"  result: {len(new_messages)} new reply(s)")
+    log(f"  result: {len(new_messages)} new message(s) to pass to LLM")
     return new_messages
 
 
 def check_thread_himalaya(participant_email, subject, last_sent_at_str, organizer, processed_ids=None):
-    """Check inbox via himalaya CLI (no thread-id; match by sender + subject)."""
+    """Fetch ALL new emails from participant since last_sent_at via himalaya.
+    No subject filtering — LLM will decide if emails are meeting-related.
+    """
     last_sent = parse_iso(last_sent_at_str)
+    # Fetch all emails from this participant, no subject filter
     cmd = ["himalaya", "envelope", "list", "--query", f"FROM {participant_email}", "--output", "json"]
     log(f"  himalaya command: {' '.join(cmd)}")
     ok, out, err = run(cmd)
@@ -128,26 +130,24 @@ def check_thread_himalaya(participant_email, subject, last_sent_at_str, organize
         if organizer and organizer in from_field:
             log(f"  env from={from_field} → SKIP (organizer)")
             continue
-        env_subject = env.get("subject", "")
-        if subject and subject not in env_subject:
-            log(f"  env from={from_field}, subject={env_subject} → SKIP (subject mismatch)")
-            continue
         msg_date = parse_date_flexible(env.get("date", ""))
         if msg_date is None:
             log(f"  env from={from_field}, date={env.get('date', '')} → SKIP (date parse failed)")
             continue
         msg_utc = msg_date.astimezone(timezone.utc)
         if last_utc and msg_utc <= last_utc:
-            log(f"  env from={from_field}, msg_utc={msg_utc.isoformat()} <= last_utc={last_utc.isoformat()} → SKIP (old)")
+            log(f"  env from={from_field}, msg_utc={msg_utc.isoformat()} <= last_utc → SKIP (old)")
             continue
-        log(f"  env from={from_field}, msg_utc={msg_utc.isoformat()} > last_utc={last_utc.isoformat() if last_utc else 'None'} → NEW")
+        env_subject = env.get("subject", "")
+        log(f"  env from={from_field}, subject={env_subject} → NEW (LLM will judge relevance)")
         new_messages.append({
-            "message_id": str(env.get("id", "")),
+            "message_id": env_id,
             "date": env.get("date", ""),
             "from": from_field,
+            "subject": env_subject,
             "snippet": env_subject,
         })
-    log(f"  result: {len(new_messages)} new reply(s)")
+    log(f"  result: {len(new_messages)} new message(s) to pass to LLM")
     return new_messages
 
 

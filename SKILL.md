@@ -126,14 +126,25 @@ Steps:
        "conversation_history": [{"timestamp": "<ISO>", "direction": "sent", "content": "初始邀请", "round": 1}],
        "rounds": 1}'
 
-3. Update state:
-   python3 <skill_dir>/scripts/meeting_state.py update <id> '{"status": "negotiating"}'
+3. Update state (set status to negotiating and pending_replies to all participant emails):
+   python3 <skill_dir>/scripts/meeting_state.py update <id> '{"status": "negotiating", "pending_replies": ["<email1>", "<email2>", ...]}'
 
-4. Create scheduled polling task via `create_scheduled_task` tool:
-   - `taskId`: `mtg-poll-<id>`
-   - `cronExpression`: `* * * * *`
-   - `description`: `Poll email replies for meeting <subject>`
-   - `prompt`:
+4. Create scheduled polling task via `cron` tool:
+   ```
+   cron(
+     action: "add",
+     job: {
+       "name": "mtg-poll-<id>",
+       "schedule": { "kind": "cron", "expr": "* * * * *" },
+       "sessionTarget": "isolated",
+       "payload": {
+         "kind": "agentTurn",
+         "message": "<prompt below>"
+       }
+     }
+   )
+   ```
+   Prompt for the payload message:
      Step 1 — Run pre-check:
      python3 <skill_dir>/scripts/check_new_replies.py --state ~/.openclaw/workspace/meetings/mtg-<id>.json
 
@@ -142,16 +153,20 @@ Steps:
      - If "action" is "process": continue to Step 3.
      Note: the pre-check script has already set poll_busy=true in the state file.
 
-     Step 3 — Execute negotiation for reason "<reason from JSON>":
-     Read <skill_dir>/references/negotiation-logic.md and execute the negotiation logic.
-     Use the reason from the JSON to determine which path to follow (see Entry Point table in negotiation-logic.md).
-     For "new_replies": use the message_ids from the JSON output to fetch full message bodies — do NOT re-scan threads.
+     Step 3 — For each message in new_replies, fetch full body and judge relevance:
+     For each message in new_replies[].messages:
+       - Fetch full body: gog gmail get <message_id> --account <organizer> --json
+       - Judge: is this email related to the meeting 「<subject>」? (reply to scheduling, availability, time confirmation, rejection, suggestion, or any meeting-related content)
+       - If NOT related (e.g. spam, unrelated topic, newsletter): mark message_id as processed (add to processed_message_ids) and skip.
+       - If related: proceed with negotiation logic.
+
+     Read <skill_dir>/references/negotiation-logic.md and execute the negotiation logic for related replies.
      State file: ~/.openclaw/workspace/meetings/mtg-<id>.json
 
      Step 4 — Clear busy flag when done:
      python3 <skill_dir>/scripts/meeting_state.py update <id> '{"poll_busy": false, "poll_busy_since": null}'
 
-   Then update state: `{"poll_task_id": "mtg-poll-<id>"}`
+   The cron tool returns a job ID. Store it in state: `{"poll_task_id": "<returned jobId>"}`
 
 5. Output final summary (auto-announced to main session):
    "📨 会议「<subject>」的邀请邮件已全部发送（共 <N> 人），开始等待回复。"
@@ -290,6 +305,7 @@ Location: `~/.openclaw/workspace/meetings/mtg-<id>.json`
   "meeting_link": "",
   "time_range_end": "2026-03-25T18:00+08:00",
   "proposed_slots": ["2026-03-18T10:00+08:00", "..."],
+  "pending_replies": ["a@example.com"],
   "poll_task_id": "mtg-poll-abc123",
   "poll_busy": false,
   "poll_busy_since": null,
@@ -349,7 +365,7 @@ himalaya envelope list --query "FROM <email> SUBJECT <subject>"
 ## Key Rules
 
 - **Never send targeted yes/no asks to participants who haven't replied yet** — only send reminders to re-ask for initial availability
-- **Immediate conflict check** among replied participants only — do not wait for others
+- **Wait for all pending replies before computing** — only run `compute_optimal_slot` when `pending_replies` is empty (all participants expected to reply in this round have replied)
 - **Final confirmation only** when ALL participants have a common agreed slot
 - **Always attach .ics** to final confirmation email — never skip this step
 - **Max 5 rounds per participant** — if exceeded, escalate to organizer
