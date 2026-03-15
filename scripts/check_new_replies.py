@@ -15,11 +15,12 @@ Exit codes:
   1 = error (file not found, parse failure, etc.)
 """
 import json
-import re
 import subprocess
 import sys
 import argparse
 from datetime import datetime, timezone, timedelta
+
+from date_utils import parse_iso, parse_date_flexible, atomic_write_json, extract_from_address
 
 
 def log(msg):
@@ -28,46 +29,28 @@ def log(msg):
 
 
 def run(cmd):
+    """Run a command given as a list of arguments (no shell interpretation)."""
     try:
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         return r.returncode == 0, r.stdout.strip(), r.stderr.strip()
     except Exception as e:
         return False, "", str(e)
 
 
-def parse_iso(s):
-    if not s:
-        return None
-    try:
-        s = s.replace("Z", "+00:00")
-        # Add :00 seconds if missing (e.g. 2026-03-15T10:00+08:00) for Python < 3.11
-        s = re.sub(r'T(\d{2}:\d{2})([+-])', r'T\1:00\2', s)
-        return datetime.fromisoformat(s)
-    except Exception:
-        return None
-
-
-def parse_date_flexible(s):
-    """Try multiple date formats; return aware datetime or None."""
-    if not s:
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S%z",
-                "%Y-%m-%dT%H:%M%z", "%a, %d %b %Y %H:%M:%S %z"):
-        try:
-            dt = datetime.strptime(s.strip(), fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt
-        except ValueError:
-            continue
-    return None
-
-
-def check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids=None):
-    """Check Gmail thread via gog CLI."""
+def check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids=None, participant_email="", subject=""):
+    """Check Gmail for replies via search (handles broken thread chains from non-Gmail clients).
+    Falls back gracefully when thread get returns 0 messages (e.g. QQ Mail breaks thread association).
+    Strategy: search by sender + subject keywords, filter by date > last_sent_at.
+    """
     last_sent = parse_iso(last_sent_at_str)
-    cmd = f'gog gmail thread get {thread_id} --json'
-    log(f"  gog command: {cmd}")
+    last_utc = last_sent.astimezone(timezone.utc) if last_sent else None
+    processed_ids = processed_ids or []
+
+    # Build search query: sender + subject (strip common prefixes for broader match)
+    subject_kw = subject.replace("会议邀请：", "").replace("Re: ", "").strip()
+    query = f'from:{participant_email} subject:"{subject_kw}"'
+    cmd = ["gog", "gmail", "messages", "search", "--account", organizer, query, "--json"]
+    log(f"  gog command: {' '.join(cmd)}")
     ok, out, err = run(cmd)
     if not ok:
         log(f"  gog command FAILED: {err or 'no output'}")
@@ -81,17 +64,15 @@ def check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids=None)
         log(f"  gog JSON parse error: {e}, raw output: {out[:200]}")
         return []
 
-    messages = data.get("messages") or []
-    log(f"  gog returned {len(messages)} message(s) in thread")
+    messages = data.get("messages") or (data if isinstance(data, list) else [])
+    log(f"  gog returned {len(messages)} message(s) from search")
     new_messages = []
-    last_utc = last_sent.astimezone(timezone.utc) if last_sent else None
-    processed_ids = processed_ids or []
     for msg in messages:
         msg_id = msg.get("id", "")
         if msg_id and msg_id in processed_ids:
             log(f"  msg id={msg_id} → SKIP (already processed)")
             continue
-        from_field = msg.get("from", "")
+        from_field = extract_from_address(msg.get("from", ""))
         if organizer and organizer in from_field:
             log(f"  msg from={from_field} → SKIP (organizer)")
             continue
@@ -103,9 +84,9 @@ def check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids=None)
         if last_utc and msg_utc <= last_utc:
             log(f"  msg from={from_field}, msg_utc={msg_utc.isoformat()} <= last_utc={last_utc.isoformat()} → SKIP (old)")
             continue
-        log(f"  msg from={from_field}, msg_utc={msg_utc.isoformat()} > last_utc={last_utc.isoformat() if last_utc else 'None'} → NEW")
+        log(f"  msg from={from_field}, msg_utc={msg_utc.isoformat()} → NEW")
         new_messages.append({
-            "message_id": msg.get("id", ""),
+            "message_id": msg_id,
             "date": msg.get("date", ""),
             "from": from_field,
             "snippet": msg.get("snippet", "") or msg.get("subject", ""),
@@ -117,8 +98,8 @@ def check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids=None)
 def check_thread_himalaya(participant_email, subject, last_sent_at_str, organizer, processed_ids=None):
     """Check inbox via himalaya CLI (no thread-id; match by sender + subject)."""
     last_sent = parse_iso(last_sent_at_str)
-    cmd = f'himalaya envelope list --query "FROM {participant_email}" --output json'
-    log(f"  himalaya command: {cmd}")
+    cmd = ["himalaya", "envelope", "list", "--query", f"FROM {participant_email}", "--output", "json"]
+    log(f"  himalaya command: {' '.join(cmd)}")
     ok, out, err = run(cmd)
     if not ok:
         log(f"  himalaya command FAILED: {err or 'no output'}")
@@ -143,7 +124,7 @@ def check_thread_himalaya(participant_email, subject, last_sent_at_str, organize
         if env_id and env_id in processed_ids:
             log(f"  env id={env_id} → SKIP (already processed)")
             continue
-        from_field = env.get("from", {}).get("addr", "") if isinstance(env.get("from"), dict) else str(env.get("from", ""))
+        from_field = extract_from_address(env.get("from", ""))
         if organizer and organizer in from_field:
             log(f"  env from={from_field} → SKIP (organizer)")
             continue
@@ -174,7 +155,7 @@ def check_thread(thread_id, last_sent_at_str, organizer, email_tool, participant
     """Dispatch to the right email tool."""
     if email_tool == "himalaya":
         return check_thread_himalaya(participant_email, subject, last_sent_at_str, organizer, processed_ids)
-    return check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids)
+    return check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids, participant_email=participant_email, subject=subject)
 
 
 def get_future_slots(proposed_slots, now):
@@ -211,44 +192,51 @@ def reminder_due(data, future_slots, now):
 
 
 def _set_poll_busy(state_path):
-    """Atomically set poll_busy=true in the state file before handing off to agent."""
+    """Set poll_busy=true in the state file before handing off to agent.
+    Uses atomic write to prevent corruption on crash."""
     try:
         with open(state_path) as f:
             state = json.load(f)
         state["poll_busy"] = True
         state["poll_busy_since"] = datetime.now(timezone.utc).isoformat()
-        with open(state_path, "w") as f:
-            json.dump(state, f, indent=2)
+        atomic_write_json(state_path, state)
     except Exception as e:
         log(f"  warning: failed to set poll_busy: {e}")
 
 
 def _clear_poll_busy(state_path):
-    """Clear poll_busy flag when no action is needed."""
+    """Clear poll_busy flag when no action is needed.
+    Uses atomic write to prevent corruption on crash."""
     try:
         with open(state_path) as f:
             state = json.load(f)
         state["poll_busy"] = False
         state["poll_busy_since"] = None
-        with open(state_path, "w") as f:
-            json.dump(state, f, indent=2)
+        atomic_write_json(state_path, state)
     except Exception as e:
         log(f"  warning: failed to clear poll_busy: {e}")
 
 
-def output_result(meeting_id, action, reason, new_replies=None, reminders_due=None, state_path=None):
+def output_result(meeting_id, action, reason, new_replies=None, reminders_due=None,
+                   state_path=None, pending_replies=None):
     """Print the JSON result separator and structured output.
     poll_busy is set early (before email checks). If action is 'none',
     release the lock so the next tick can proceed.
+
+    pending_replies: list of emails still awaiting reply in this round.
+    all_pending_replied: True when pending_replies is empty (safe to compute).
     """
     if action == "none" and state_path:
         _clear_poll_busy(state_path)
+    pending = pending_replies if pending_replies is not None else []
     result = {
         "action": action,
         "meeting_id": meeting_id,
         "reason": reason,
         "new_replies": new_replies or [],
         "reminders_due": reminders_due or [],
+        "pending_replies": pending,
+        "all_pending_replied": len(pending) == 0,
     }
     print("---JSON---")
     print(json.dumps(result))
@@ -288,6 +276,7 @@ def main():
     email_tool = state.get("email_tool", "gog")
     subject = state.get("subject", "")
     proposed_slots = state.get("proposed_slots", [])
+    pending_replies = list(state.get("pending_replies", []))
     now_utc = datetime.now(timezone.utc)
 
     log(f"[{meeting_id}] starting poll check (email_tool={email_tool}, organizer={organizer})")
@@ -333,8 +322,14 @@ def main():
 
     # New replies take priority — process them even if all slots expired (reply may add new slots)
     if new_replies:
-        log(f"[{meeting_id}] action needed: reason=new_replies, count={len(new_replies)}")
-        output_result(meeting_id, "process", "new_replies", new_replies=new_replies, reminders_due=reminders_due_list, state_path=args.state)
+        # Compute remaining pending_replies after these replies
+        replied_emails = {r["email"] for r in new_replies}
+        remaining_pending = [e for e in pending_replies if e not in replied_emails]
+        log(f"[{meeting_id}] action needed: reason=new_replies, count={len(new_replies)}, "
+            f"pending_remaining={len(remaining_pending)}/{len(pending_replies)}")
+        output_result(meeting_id, "process", "new_replies", new_replies=new_replies,
+                      reminders_due=reminders_due_list, state_path=args.state,
+                      pending_replies=remaining_pending)
         sys.exit(0)
 
     # All slots expired (only checked after confirming no new replies)
@@ -343,13 +338,15 @@ def main():
         range_ended = time_range_end and time_range_end.astimezone(timezone.utc) <= now_utc
         reason = "all_slots_expired_range_ended" if range_ended else "all_slots_expired"
         log(f"[{meeting_id}] all proposed slots have expired (range_ended={range_ended})")
-        output_result(meeting_id, "process", reason, state_path=args.state)
+        output_result(meeting_id, "process", reason, state_path=args.state,
+                      pending_replies=pending_replies)
         sys.exit(0)
 
     # Reminders due
     if reminders_due_list:
         log(f"[{meeting_id}] action needed: reason=reminders_due, count={len(reminders_due_list)}")
-        output_result(meeting_id, "process", "reminders_due", reminders_due=reminders_due_list, state_path=args.state)
+        output_result(meeting_id, "process", "reminders_due", reminders_due=reminders_due_list,
+                      state_path=args.state, pending_replies=pending_replies)
         sys.exit(0)
 
     # Urgency escalation: < 6h to nearest slot with participants still waiting
@@ -366,11 +363,13 @@ def main():
             urgency_hours = (nearest.astimezone(timezone.utc) - now_utc).total_seconds() / 3600
             if urgency_hours < 6:
                 log(f"[{meeting_id}] urgency escalation: {len(waiting_participants)} waiting, nearest slot in {urgency_hours:.1f}h")
-                output_result(meeting_id, "process", "urgency_escalation", reminders_due=waiting_participants, state_path=args.state)
+                output_result(meeting_id, "process", "urgency_escalation", reminders_due=waiting_participants,
+                              state_path=args.state, pending_replies=pending_replies)
                 sys.exit(0)
 
     log(f"[{meeting_id}] no action needed")
-    output_result(meeting_id, "none", "no_new_replies", state_path=args.state)
+    output_result(meeting_id, "none", "no_new_replies", state_path=args.state,
+                  pending_replies=pending_replies)
     sys.exit(0)
 
 
