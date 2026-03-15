@@ -312,20 +312,26 @@ python3 <skill_dir>/scripts/meeting_state.py update <id> \
 Scheduled-task agents notify the user by outputting a clear message as their final response.
 The scheduled-task system will deliver this to the user automatically.
 
-To notify the user, run the notify_user.py script via exec:
+To notify the user, run notify_user.py with the appropriate event:
 ```bash
+# Consensus reached
 python3 <skill_dir>/scripts/notify_user.py \
   --state ~/.openclaw/workspace/meetings/mtg-<id>.json \
-  --message "<notification text>"
+  --event consensus
+
+# Escalation needed
+python3 <skill_dir>/scripts/notify_user.py \
+  --state ~/.openclaw/workspace/meetings/mtg-<id>.json \
+  --event escalation:<reason>
 ```
-This sends the message directly to the main session via the local gateway, which routes it to the user on whatever channel they are on — webchat, Telegram, or any other.
+This sends a structured signal to the main session. The main session reads the state and outputs a formatted assistant bubble — no raw text is shown to the user from the cron agent.
 
 Do NOT output text as the agent's final response — delivery=none means any output goes nowhere.
 Do NOT use sessions_send tool or message tool — use notify_user.py instead.
 
 **Only notify when user action is required or the outcome is final:**
-- ✅ Consensus reached → notify via notify_user.py, use **Node 5** template in `<skill_dir>/references/ux-copy.md`
-- ✅ Escalation needed (stalled, deadlock, needs_organizer) → notify via notify_user.py, use **Escalation** template in `<skill_dir>/references/ux-copy.md`
+- ✅ Consensus reached → `--event consensus`
+- ✅ Escalation needed (stalled, deadlock, needs_organizer) → `--event escalation:<reason>`
 - ❌ "X replied, still waiting for Y" → output nothing and stop
 - ❌ Any intermediate progress update → output nothing and stop
 

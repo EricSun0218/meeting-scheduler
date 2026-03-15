@@ -145,11 +145,13 @@ Show the invite draft to the user for review following the template in [referenc
    Step 6 — If consensus reached or escalation needed, run:
    python3 <skill_dir>/scripts/notify_user.py \
      --state ~/.openclaw/workspace/meetings/mtg-<id>.json \
-     --message "<notification text>"
+     --event <event>
 
-   For the notification text:
-   - Consensus reached → follow Node 5 template in <skill_dir>/references/ux-copy.md (include full email draft so user can approve)
-   - Escalation needed → follow Escalation template in <skill_dir>/references/ux-copy.md
+   Event values:
+   - Consensus reached → --event consensus
+   - Escalation needed → --event escalation:<reason>  (e.g. escalation:stalled, escalation:deadlock)
+
+   The main session receives the signal, reads the state, and outputs the formatted message as an assistant bubble.
 
    If no consensus and no escalation: output nothing and stop.
    ```
@@ -301,10 +303,12 @@ Steps:
 6. Notify the user via notify_user.py:
    python3 <skill_dir>/scripts/notify_user.py \
      --state ~/.openclaw/workspace/meetings/mtg-<id>.json \
-     --message "<notification text>"
+     --event confirmed
 
-   Follow the Node 6 template in <skill_dir>/references/ux-copy.md for the notification text.
-   If ANY email failed: use the Escalation template instead and include which participants failed.
+   If ANY email failed, use:
+     --event escalation:send_failed
+
+   The main session receives the signal, reads the state, and outputs the formatted Node 6 (or Escalation) message as an assistant bubble.
 ```
 
 ---

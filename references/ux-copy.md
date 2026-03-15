@@ -46,8 +46,8 @@ If any emails failed:
 
 ## Node 5 — Consensus Reached (via notify_user.py)
 
-Send via `notify_user.py` when all participants have agreed on a slot.
-Show the full draft email for user approval before sending final confirmation.
+Triggered by signal `__MEETING_NOTIFY__:<id>:consensus` sent via `notify_user.py --event consensus`.
+The main session receives the signal, reads the state file, and outputs this message as an assistant bubble.
 
 ```
 🗓️ 会议「{subject}」时间已协商完毕！
@@ -85,7 +85,8 @@ Note: if `meeting_link` is not yet generated (auto-generate via gog/zoom/teams),
 
 ## Node 6 — Final Confirmation Sent (via notify_user.py)
 
-Send via `notify_user.py` after all final confirmation emails are sent successfully.
+Triggered by signal `__MEETING_NOTIFY__:<id>:confirmed` sent via `notify_user.py --event confirmed`.
+The main session receives the signal, reads the state file, and outputs this message as an assistant bubble.
 
 ```
 ✅ 会议「{subject}」已确认！
@@ -99,7 +100,8 @@ Send via `notify_user.py` after all final confirmation emails are sent successfu
 
 ## Escalation — Needs Organizer (via notify_user.py)
 
-Send via `notify_user.py` when negotiation cannot resolve automatically.
+Triggered by signal `__MEETING_NOTIFY__:<id>:escalation:<reason>` sent via `notify_user.py --event escalation:<reason>`.
+The main session receives the signal, reads the state file, and outputs this message as an assistant bubble.
 
 ```
 ⚠️ 会议「{subject}」协商遇到问题，需要你来决定：
