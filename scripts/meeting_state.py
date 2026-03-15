@@ -12,6 +12,7 @@ Usage:
 import json
 import sys
 import os
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -23,6 +24,8 @@ def ensure_dir():
 
 
 def state_path(meeting_id):
+    if meeting_id.startswith("mtg-"):
+        meeting_id = meeting_id[4:]
     return MEETINGS_DIR / f"mtg-{meeting_id}.json"
 
 
@@ -37,8 +40,18 @@ def load(meeting_id):
 
 def save(meeting_id, state):
     ensure_dir()
-    with open(state_path(meeting_id), "w") as f:
-        json.dump(state, f, indent=2)
+    target = state_path(meeting_id)
+    fd, tmp = tempfile.mkstemp(dir=target.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f, indent=2)
+        os.rename(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def create(subject):
@@ -62,6 +75,7 @@ def create(subject):
         "poll_busy_since": None,
         "time_range_end": "",
         "proposed_slots": [],
+        "pending_replies": [],
         "participants": {},
         "final_agreed_slot": None,
         "confirmed_at": None

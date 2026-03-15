@@ -71,9 +71,10 @@ class TestCheckThreadGog(unittest.TestCase):
         result = cnr.check_thread_gog("thread123", "2026-03-15T10:00:00Z", "organizer@example.com")
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["from"], "alice@example.com")
-        # Verify gog gmail thread get command
+        # Verify gog gmail thread get command (now called with list args)
         mock_run.assert_called_once()
-        self.assertIn("gog gmail thread get", mock_run.call_args[0][0])
+        cmd_args = mock_run.call_args[0][0]
+        self.assertEqual(cmd_args[:4], ["gog", "gmail", "thread", "get"])
 
     @patch("check_new_replies.run")
     def test_no_new_reply(self, mock_run):
@@ -251,7 +252,8 @@ class TestOutputResult(unittest.TestCase):
         f = io.StringIO()
         with redirect_stdout(f):
             cnr.output_result("abc123", "process", "new_replies",
-                              new_replies=[{"email": "a@b.com"}], reminders_due=["c@d.com"])
+                              new_replies=[{"email": "a@b.com"}], reminders_due=["c@d.com"],
+                              pending_replies=["x@y.com"])
         output = f.getvalue()
         self.assertIn("---JSON---", output)
         lines = output.strip().split("\n")
@@ -262,6 +264,34 @@ class TestOutputResult(unittest.TestCase):
         self.assertEqual(data["reason"], "new_replies")
         self.assertEqual(len(data["new_replies"]), 1)
         self.assertEqual(len(data["reminders_due"]), 1)
+        self.assertEqual(data["pending_replies"], ["x@y.com"])
+        self.assertFalse(data["all_pending_replied"])
+
+    def test_output_all_pending_replied_true(self):
+        import io
+        from contextlib import redirect_stdout
+        f = io.StringIO()
+        with redirect_stdout(f):
+            cnr.output_result("abc123", "process", "new_replies",
+                              pending_replies=[])
+        output = f.getvalue()
+        json_str = output.split("---JSON---\n", 1)[1].strip()
+        data = json.loads(json_str)
+        self.assertEqual(data["pending_replies"], [])
+        self.assertTrue(data["all_pending_replied"])
+
+    def test_output_pending_replies_default_empty(self):
+        """When pending_replies is not provided, defaults to empty list."""
+        import io
+        from contextlib import redirect_stdout
+        f = io.StringIO()
+        with redirect_stdout(f):
+            cnr.output_result("abc123", "none", "no_new_replies")
+        output = f.getvalue()
+        json_str = output.split("---JSON---\n", 1)[1].strip()
+        data = json.loads(json_str)
+        self.assertEqual(data["pending_replies"], [])
+        self.assertTrue(data["all_pending_replied"])
 
     def test_process_does_not_change_poll_busy(self):
         """When action is 'process', output_result should NOT touch poll_busy
@@ -319,7 +349,8 @@ class TestOutputResult(unittest.TestCase):
 
 
 def _make_state(meeting_id="test123", status="negotiating", proposed_slots=None,
-                participants=None, poll_busy=False, poll_busy_since=None, **kwargs):
+                participants=None, poll_busy=False, poll_busy_since=None,
+                pending_replies=None, **kwargs):
     """Helper to create a state dict and write it to a temp file."""
     state = {
         "id": meeting_id,
@@ -328,6 +359,7 @@ def _make_state(meeting_id="test123", status="negotiating", proposed_slots=None,
         "email_tool": "gog",
         "subject": "Test Meeting",
         "proposed_slots": proposed_slots or [],
+        "pending_replies": pending_replies if pending_replies is not None else [],
         "participants": participants or {},
         "poll_task_id": "mtg-poll-test123",
         "poll_busy": poll_busy,
@@ -437,13 +469,55 @@ class TestMainIntegration(unittest.TestCase):
         }), "")
         path = _make_state(
             proposed_slots=["2026-03-20T10:00:00Z"],
-            participants={"alice@example.com": _make_participant()}
+            participants={"alice@example.com": _make_participant()},
+            pending_replies=["alice@example.com", "bob@example.com"]
         )
         try:
             result, output = _run_main(path)
             self.assertEqual(result["action"], "process")
             self.assertEqual(result["reason"], "new_replies")
             self.assertEqual(len(result["new_replies"]), 1)
+            # alice replied → removed from pending, bob still pending
+            self.assertEqual(result["pending_replies"], ["bob@example.com"])
+            self.assertFalse(result["all_pending_replied"])
+        finally:
+            os.unlink(path)
+
+    @patch("check_new_replies.run")
+    def test_new_replies_all_pending_replied(self, mock_run):
+        """When the last pending participant replies, all_pending_replied should be true."""
+        mock_run.return_value = (True, json.dumps({
+            "messages": [
+                {"id": "msg1", "from": "alice@example.com", "date": "2026-03-15 12:00:00", "snippet": "OK"},
+            ]
+        }), "")
+        path = _make_state(
+            proposed_slots=["2026-03-20T10:00:00Z"],
+            participants={"alice@example.com": _make_participant()},
+            pending_replies=["alice@example.com"]
+        )
+        try:
+            result, output = _run_main(path)
+            self.assertEqual(result["action"], "process")
+            self.assertEqual(result["pending_replies"], [])
+            self.assertTrue(result["all_pending_replied"])
+        finally:
+            os.unlink(path)
+
+    @patch("check_new_replies.run")
+    def test_no_pending_replies_field_defaults_empty(self, mock_run):
+        """State without pending_replies field should default to empty list."""
+        mock_run.return_value = (True, json.dumps({"messages": []}), "")
+        path = _make_state(
+            proposed_slots=["2026-03-25T10:00:00Z"],
+            participants={"alice@example.com": _make_participant(
+                last_sent_at="2026-03-15T11:00:00Z"
+            )}
+        )
+        try:
+            result, output = _run_main(path)
+            self.assertEqual(result["pending_replies"], [])
+            self.assertTrue(result["all_pending_replied"])
         finally:
             os.unlink(path)
 

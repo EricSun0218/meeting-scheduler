@@ -3,6 +3,7 @@
 Detect available email, calendar, and meeting link tools.
 Outputs JSON with discovered capabilities.
 """
+import functools
 import json
 import platform
 import subprocess
@@ -10,8 +11,9 @@ import shutil
 
 
 def run(cmd, timeout=5):
+    """Run a command given as a list of arguments (no shell interpretation)."""
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return result.returncode == 0, result.stdout.strip(), result.stderr.strip()
     except Exception:
         return False, "", ""
@@ -19,22 +21,16 @@ def run(cmd, timeout=5):
 
 # ── Caches ────────────────────────────────────────────────────────────────
 
+@functools.lru_cache(maxsize=1)
 def _check_gog_calendar():
     """Check gog calendar access (cached)."""
-    if not hasattr(_check_gog_calendar, "_result"):
-        _check_gog_calendar._result = (
-            shutil.which("gog") is not None and run("gog calendar list --limit 1")[0]
-        )
-    return _check_gog_calendar._result
+    return shutil.which("gog") is not None and run(["gog", "calendar", "list", "--limit", "1"])[0]
 
 
+@functools.lru_cache(maxsize=1)
 def _check_gcalcli():
     """Check gcalcli access (cached)."""
-    if not hasattr(_check_gcalcli, "_result"):
-        _check_gcalcli._result = (
-            shutil.which("gcalcli") is not None and run("gcalcli list")[0]
-        )
-    return _check_gcalcli._result
+    return shutil.which("gcalcli") is not None and run(["gcalcli", "list"])[0]
 
 
 # ── Email ─────────────────────────────────────────────────────────────────
@@ -44,7 +40,7 @@ def detect_email_tools():
 
     # gog (Google Workspace CLI — Gmail)
     if shutil.which("gog"):
-        ok, _, _ = run("gog auth status")
+        ok, _, _ = run(["gog", "auth", "status"])
         tools.append({
             "name": "gog",
             "provider": "gmail",
@@ -53,7 +49,7 @@ def detect_email_tools():
 
     # himalaya (IMAP/SMTP)
     if shutil.which("himalaya"):
-        ok, out, _ = run("himalaya account list")
+        ok, out, _ = run(["himalaya", "account", "list"])
         if ok:
             accounts = [l.strip() for l in out.splitlines() if l.strip() and not l.startswith("#")]
             tools.append({
@@ -92,7 +88,7 @@ def detect_calendar_tools():
 
     # icalBuddy — macOS Calendar (reads Apple Calendar / CalDAV accounts)
     if platform.system() == "Darwin" and shutil.which("icalBuddy"):
-        ok, _, _ = run("icalBuddy -n eventsToday")
+        ok, _, _ = run(["icalBuddy", "-n", "eventsToday"])
         if ok:
             tools.append({
                 "name": "icalBuddy",
@@ -103,7 +99,7 @@ def detect_calendar_tools():
 
     # khal — CalDAV terminal calendar
     if shutil.which("khal"):
-        ok, _, _ = run("khal list today today")
+        ok, _, _ = run(["khal", "list", "today", "today"])
         if ok:
             tools.append({
                 "name": "khal",
@@ -147,7 +143,7 @@ def detect_meeting_link_tools():
 
     # Microsoft Teams via Microsoft Graph CLI
     if shutil.which("mgc"):
-        ok, _, _ = run("mgc me get")
+        ok, _, _ = run(["mgc", "me", "get"])
         if ok:
             tools.append({
                 "name": "teams",

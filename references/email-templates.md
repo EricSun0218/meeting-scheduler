@@ -101,6 +101,8 @@ Hi,
 已附上日历邀请文件（.ics），直接打开即可添加到您的日历。
 
 期待与大家的会议！
+
+代 {organizer_name} 发送（OpenClaw AI 助手）
 ```
 
 `{meeting_link_line}` → omit if empty, else: `会议链接：{meeting_link}`

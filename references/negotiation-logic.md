@@ -74,6 +74,23 @@ python3 <skill_dir>/scripts/meeting_state.py update_participant <id> <email> \
 
 If participant declines ALL slots AND suggests no alternative → set `status: "declined"`.
 
+### Step 3.5 — Update pending replies and check readiness
+
+After parsing a reply, update the `pending_replies` list in state:
+
+1. Remove the replied participant's email from `pending_replies`
+2. If the participant was set to `status: "declined"` (rejected all, no alternative) → also remove from `pending_replies`
+3. Update state:
+```bash
+python3 <skill_dir>/scripts/meeting_state.py update <id> '{"pending_replies": [<remaining emails>]}'
+```
+
+4. Check `pending_replies`:
+   - **Not empty** → STOP here. Do NOT proceed to Step 4. Clear `poll_busy`, then output nothing and stop (empty response). Do NOT output "NO_REPLY" — in isolated cron sessions that string is delivered literally to the user. Do NOT output any summary or progress update — there is nothing actionable yet. The next cron tick will check for more replies.
+   - **Empty** → All participants in this round have replied. Proceed to Step 4.
+
+Note: The pre-check output includes `all_pending_replied` and `pending_replies` fields for reference, but always verify against the latest state after parsing replies.
+
 ### Step 4 — Run optimal slot computation
 
 ```bash
@@ -100,7 +117,11 @@ Contact `unavailable_for_best` with a **single targeted yes/no ask**:
 - Update: `rounds += 1`, `last_sent_at = now`, `status = "waiting_reply"`
 - Record the sent message in `conversation_history`: `{"timestamp": "<ISO>", "direction": "sent", "content": "<email summary>", "round": <rounds>}`
 - Do NOT re-contact participants who already said yes
-- On reply: rerun compute → repeat decision tree
+- **Set `pending_replies` to the list of `unavailable_for_best` emails** (only those who need to reply in this new round):
+```bash
+python3 <skill_dir>/scripts/meeting_state.py update <id> '{"pending_replies": ["<email1>", "<email2>"]}'
+```
+- On reply: parse reply → update pending_replies (Step 3.5) → when all replied → rerun compute → repeat decision tree
 
 ### Case C — `status: "needs_organizer"`
 
@@ -127,7 +148,7 @@ urgency_hours = (min(remaining_slots) - now).total_seconds() / 3600
 | < 6h    | stop reminders   | → go to [Escalate to Organizer](#escalate-to-organizer) (reason: 距最近时间段不足6小时) |
 
 **After each reminder:** `rounds += 1`, update `last_sent_at`. Record in `conversation_history`.
-**If `rounds >= 5`:** set participant `status: "stalled"`, then → go to [Escalate to Organizer](#escalate-to-organizer) for this participant.
+**If `rounds >= 5`:** set participant `status: "stalled"`, remove from `pending_replies`. If `pending_replies` becomes empty → run compute before escalating. Then → go to [Escalate to Organizer](#escalate-to-organizer) for this participant.
 
 ---
 
@@ -152,13 +173,14 @@ khal list <now> <time_range_end> -df '{start-date}' -f '{start-time} {end-time} 
 ```
 Parse busy times, compute free gaps, pick 5 new slots.
 Add to `proposed_slots`, send new invite round (same structured A/B/C format as initial invite).
+Set `pending_replies` to all active (non-declined, non-skipped, non-stalled) participant emails.
 Notify organizer: "候选时间已过期，已根据您的日历自动补充新的候选时段，继续协商中。"
 
 **If no `calendar_tool` OR `time_range_end` has passed:**
 Disable the polling task (if `poll_task_id` is set) and update state:
 ```
 If state.poll_task_id is not empty:
-  Use `update_scheduled_task` tool: taskId = state.poll_task_id, enabled = false
+  Use `cron` tool: action = "update", jobId = state.poll_task_id, patch = { "enabled": false }
 ```
 ```bash
 python3 <skill_dir>/scripts/meeting_state.py update <id> \
@@ -185,7 +207,7 @@ Triggered when:
 1. Disable the polling task (if `poll_task_id` is set) and update state:
 ```
 If state.poll_task_id is not empty:
-  Use `update_scheduled_task` tool: taskId = state.poll_task_id, enabled = false
+  Use `cron` tool: action = "update", jobId = state.poll_task_id, patch = { "enabled": false }
 ```
 ```bash
 python3 <skill_dir>/scripts/meeting_state.py update <id> \
@@ -212,8 +234,8 @@ python3 <skill_dir>/scripts/meeting_state.py update <id> \
 
 **On organizer reply:**
 - **A（强制）** → skip negotiation, set `final_agreed_slot = best_slot`, go to pending_final_approval
-- **B（新时间段）** → add new slots to `proposed_slots`, re-enable polling task if `poll_task_id` is set via `update_scheduled_task` tool (taskId = state.poll_task_id, enabled = true), update `{"status": "negotiating"}`
-- **C（忽略某人）** → set that participant `status: "skipped"`, rerun compute (skipped excluded from scoring), re-enable polling task if result is not perfect via `update_scheduled_task` (taskId = state.poll_task_id, enabled = true)
+- **B（新时间段）** → add new slots to `proposed_slots`, set `pending_replies` to all active participant emails, re-enable polling task if `poll_task_id` is set via `cron` tool (action = "update", jobId = state.poll_task_id, patch = { "enabled": true }), update `{"status": "negotiating"}`
+- **C（忽略某人）** → set that participant `status: "skipped"`, rerun compute (skipped excluded from scoring), re-enable polling task if result is not perfect via `cron` tool (action = "update", jobId = state.poll_task_id, patch = { "enabled": true })
 - **D（取消）** → set `status: "cancelled"`, notify all participants
 
 ---
@@ -225,6 +247,7 @@ When organizer chooses to ignore a participant:
 python3 <skill_dir>/scripts/meeting_state.py update_participant <id> <email> \
   '{"status": "skipped"}'
 ```
+Also remove from `pending_replies`. If `pending_replies` becomes empty → run compute.
 
 - Excluded from `compute_optimal_slot` scoring entirely
 - Still receive the final confirmation email (they were invited)
@@ -246,7 +269,7 @@ python3 <skill_dir>/scripts/meeting_state.py update_participant <id> <email> \
 2. Disable the polling task (if `poll_task_id` is set) and update state:
 ```
 If state.poll_task_id is not empty:
-  Use `update_scheduled_task` tool: taskId = state.poll_task_id, enabled = false
+  Use `cron` tool: action = "update", jobId = state.poll_task_id, patch = { "enabled": false }
 ```
 ```bash
 python3 <skill_dir>/scripts/meeting_state.py update <id> \
@@ -269,7 +292,7 @@ Triggered when `deadlock_reason: "all_declined"` or `"all_slots_exhausted"` or `
 1. Disable the polling task (if `poll_task_id` is set) and update state:
 ```
 If state.poll_task_id is not empty:
-  Use `update_scheduled_task` tool: taskId = state.poll_task_id, enabled = false
+  Use `cron` tool: action = "update", jobId = state.poll_task_id, patch = { "enabled": false }
 ```
 ```bash
 python3 <skill_dir>/scripts/meeting_state.py update <id> \
@@ -289,8 +312,24 @@ python3 <skill_dir>/scripts/meeting_state.py update <id> \
 Scheduled-task agents notify the user by outputting a clear message as their final response.
 The scheduled-task system will deliver this to the user automatically.
 
-Simply output the notification text (e.g. consensus reached, escalation needed) as the agent's response.
-Do NOT attempt to use `sessions_send`, `message`, or other tools to notify — just output the message.
+To notify the user, run the notify_user.py script via exec:
+```bash
+python3 <skill_dir>/scripts/notify_user.py \
+  --state ~/.openclaw/workspace/meetings/mtg-<id>.json \
+  --message "<notification text>"
+```
+This sends the message directly to the main session via the local gateway, which routes it to the user on whatever channel they are on — webchat, Telegram, or any other.
+
+Do NOT output text as the agent's final response — delivery=none means any output goes nowhere.
+Do NOT use sessions_send tool or message tool — use notify_user.py instead.
+
+**Only notify when user action is required or the outcome is final:**
+- ✅ Consensus reached → notify via notify_user.py, use **Node 5** template in `<skill_dir>/references/ux-copy.md`
+- ✅ Escalation needed (stalled, deadlock, needs_organizer) → notify via notify_user.py, use **Escalation** template in `<skill_dir>/references/ux-copy.md`
+- ❌ "X replied, still waiting for Y" → output nothing and stop
+- ❌ Any intermediate progress update → output nothing and stop
+
+**Never hardcode user-specific values** (email addresses, chatIds, phone numbers, etc.) into cron payloads or skill instructions. Read everything from the state file at runtime.
 
 ---
 

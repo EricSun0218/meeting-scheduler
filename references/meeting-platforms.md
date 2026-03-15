@@ -12,12 +12,12 @@ Google Meet links are generated automatically via the `gog` Google Calendar inte
 
 **Generate a Meet link:**
 ```bash
-gog calendar create \
-  --title "<meeting title>" \
-  --start "<ISO datetime>" \
-  --duration <minutes> \
+gog calendar create primary \
+  --summary "<meeting title>" \
+  --from "<ISO datetime start>" \
+  --to "<ISO datetime end>" \
   --attendees "<email1>,<email2>" \
-  --conferencing meet
+  --with-meet --json
 ```
 
 Output includes `hangoutLink` field with the Google Meet URL.

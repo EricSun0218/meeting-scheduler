@@ -60,6 +60,7 @@ Collect all required fields before drafting anything. Ask only for what's missin
 | `description` | ❌ | Optional agenda |
 | `proposed_slots` | auto | Generated based on time range (see rules below) |
 
+
 **Slot generation rules:**
 ```
 time_range covers 1–2 days  → generate 5 slots
@@ -93,14 +94,77 @@ Parse each tool's output to extract busy time ranges, then generate slots in the
 
 Update state: `{"status": "pending_approval"}`
 
-Draft plain-text invitation email for user review (see [references/email-templates.md](references/email-templates.md#initial-invite)). After user approves:
+Show the invite draft to the user for review following the template in [references/ux-copy.md](references/ux-copy.md#node-2--invite-draft-confirmation). After user approves:
 
-**Main session:**
-1. **Spawn a sub-agent** with the task below → **immediately return control to main session**
-   Tell user: "邀请邮件正在后台发送，发送完毕后将自动开始轮询回复。"
-   (Sub-agent result will auto-announce back to this session when done.)
+**Main session (in order):**
 
-**Sub-agent task (send invites & start polling, runs in background):**
+1. **First — create the polling cron job** via `cron` tool before spawning the sub-agent.
+   This ensures polling is active even if the sub-agent fails or times out mid-way.
+
+   ```
+   cron(
+     action: "add",
+     job: {
+       "name": "mtg-poll-<id>",
+       "schedule": { "kind": "every", "everyMs": 60000 },
+       "sessionTarget": "isolated",
+       "payload": {
+         "kind": "agentTurn",
+         "message": "<poll prompt — see below>"
+       },
+       "delivery": { "mode": "none" }
+     }
+   )
+   ```
+   The cron agent notifies the user via `notify_user.py` (exec shell call) — reliable, no dependency on model tool compliance.
+
+   Poll prompt — use EXACTLY this text with `<id>` and `<skill_dir>` substituted:
+   ```
+   You are a meeting-scheduler polling agent.
+
+   State file: ~/.openclaw/workspace/meetings/mtg-<id>.json
+   Skill dir: <skill_dir>
+
+   Step 1 — Read the state file. Extract: id, organizer, subject, email_tool.
+
+   Step 2 — Run pre-check:
+   python3 <skill_dir>/scripts/check_new_replies.py --state ~/.openclaw/workspace/meetings/mtg-<id>.json
+
+   Step 3 — If the script produced no output: output nothing and stop immediately.
+   If the script output contains ---JSON---: parse the JSON after that line and continue to Step 4.
+
+   Step 4 — For each message in new_replies[].messages:
+     - Fetch full body using email_tool and organizer from state (e.g. gog gmail get <message_id> --account <organizer> --json)
+     - Judge: is this email related to the meeting subject? (reply about scheduling, availability, time, confirmation, rejection)
+     - If NOT related: add message_id to processed_message_ids and skip.
+     - If related: read <skill_dir>/references/negotiation-logic.md and execute negotiation logic.
+
+   Step 5 — Clear busy flag:
+   python3 <skill_dir>/scripts/meeting_state.py update <id> '{"poll_busy": false, "poll_busy_since": null, "last_polled_at": "<ISO now>"}'
+
+   Step 6 — If consensus reached or escalation needed, run:
+   python3 <skill_dir>/scripts/notify_user.py \
+     --state ~/.openclaw/workspace/meetings/mtg-<id>.json \
+     --message "<notification text>"
+
+   For the notification text:
+   - Consensus reached → follow Node 5 template in <skill_dir>/references/ux-copy.md (include full email draft so user can approve)
+   - Escalation needed → follow Escalation template in <skill_dir>/references/ux-copy.md
+
+   If no consensus and no escalation: output nothing and stop.
+   ```
+
+   ⚠️ When creating the cron job, use the EXACT prompt text above with `<id>` and `<skill_dir>` replaced by the real values. Do NOT hardcode organizer email, participant emails, chatIds, or any user-specific values into the payload — the cron agent reads everything it needs from the state file at runtime.
+
+   Store the returned job ID in state:
+   ```
+   python3 <skill_dir>/scripts/meeting_state.py update <id> '{"poll_task_id": "<returned jobId>"}'
+   ```
+
+2. **Then — spawn a sub-agent** to send the invites → **immediately return control to main session**
+   Tell user: "邀请邮件正在后台发送，轮询已启动，有回复时将自动通知。"
+
+**Sub-agent task (send invites only, runs in background):**
 
 ```
 You are the meeting-scheduler invite-sender agent for meeting <id>.
@@ -126,51 +190,11 @@ Steps:
        "conversation_history": [{"timestamp": "<ISO>", "direction": "sent", "content": "初始邀请", "round": 1}],
        "rounds": 1}'
 
-3. Update state (set status to negotiating and pending_replies to all participant emails):
+3. Update state:
    python3 <skill_dir>/scripts/meeting_state.py update <id> '{"status": "negotiating", "pending_replies": ["<email1>", "<email2>", ...]}'
 
-4. Create scheduled polling task via `cron` tool:
-   ```
-   cron(
-     action: "add",
-     job: {
-       "name": "mtg-poll-<id>",
-       "schedule": { "kind": "cron", "expr": "* * * * *" },
-       "sessionTarget": "isolated",
-       "payload": {
-         "kind": "agentTurn",
-         "message": "<prompt below>"
-       }
-     }
-   )
-   ```
-   Prompt for the payload message:
-     Step 1 — Run pre-check:
-     python3 <skill_dir>/scripts/check_new_replies.py --state ~/.openclaw/workspace/meetings/mtg-<id>.json
-
-     Step 2 — Parse the output. Find the line after "---JSON---" and parse as JSON.
-     - If "action" is "none": respond with NO_REPLY. Stop immediately.
-     - If "action" is "process": continue to Step 3.
-     Note: the pre-check script has already set poll_busy=true in the state file.
-
-     Step 3 — For each message in new_replies, fetch full body and judge relevance:
-     For each message in new_replies[].messages:
-       - Fetch full body: gog gmail get <message_id> --account <organizer> --json
-       - Judge: is this email related to the meeting 「<subject>」? (reply to scheduling, availability, time confirmation, rejection, suggestion, or any meeting-related content)
-       - If NOT related (e.g. spam, unrelated topic, newsletter): mark message_id as processed (add to processed_message_ids) and skip.
-       - If related: proceed with negotiation logic.
-
-     Read <skill_dir>/references/negotiation-logic.md and execute the negotiation logic for related replies.
-     State file: ~/.openclaw/workspace/meetings/mtg-<id>.json
-
-     Step 4 — Clear busy flag when done:
-     python3 <skill_dir>/scripts/meeting_state.py update <id> '{"poll_busy": false, "poll_busy_since": null}'
-
-   The cron tool returns a job ID. Store it in state: `{"poll_task_id": "<returned jobId>"}`
-
-5. Output final summary (auto-announced to main session):
-   "📨 会议「<subject>」的邀请邮件已全部发送（共 <N> 人），开始等待回复。"
-   If ANY email failed to send: include which participants failed, so user can retry manually.
+4. Output summary following the template in [references/ux-copy.md](references/ux-copy.md#node-3--invites-sent).
+   Use the success template if all emails sent, or the failure variant if any failed.
 ```
 
 ---
@@ -195,7 +219,7 @@ When user responds to the consensus notification:
    - `meeting_link_tool` is none → ask user:
      > "时间已确定（{final_agreed_slot}）。请提供会议链接（Zoom、腾讯会议、飞书、Teams 等），或回复'不需要'跳过。"
      Store reply in `state.meeting_link`.
-2. Show final email draft to user for approval (see [references/email-templates.md](references/email-templates.md#final-confirmation))
+2. Show final email draft to user for approval — follow Node 5 template in [references/ux-copy.md](references/ux-copy.md#node-5--consensus-reached-via-notify_userpy)
 3. On user approval → **spawn a sub-agent** with the task below → **immediately return control to main session**
 
 **Sub-agent task (final confirmation, runs in background):**
@@ -275,12 +299,13 @@ Steps:
      python3 <skill_dir>/scripts/meeting_state.py update <id> \
        '{"status": "needs_organizer"}'
 
-6. Output final summary (auto-announced to main session):
-   "✅ 会议「<subject>」最终邀请已发送！
-   时间：<datetime>（<timezone>）
-   参与者：<email list>
-   会议链接：<meeting_link>"
-   If ANY email failed: include which participants failed and which succeeded.
+6. Notify the user via notify_user.py:
+   python3 <skill_dir>/scripts/notify_user.py \
+     --state ~/.openclaw/workspace/meetings/mtg-<id>.json \
+     --message "<notification text>"
+
+   Follow the Node 6 template in <skill_dir>/references/ux-copy.md for the notification text.
+   If ANY email failed: use the Escalation template instead and include which participants failed.
 ```
 
 ---
@@ -310,6 +335,7 @@ Location: `~/.openclaw/workspace/meetings/mtg-<id>.json`
   "poll_busy": false,
   "poll_busy_since": null,
   "participants": {
+
     "a@example.com": {
       "name": "",
       "rounds": 1,

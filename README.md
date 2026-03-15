@@ -26,7 +26,7 @@ Only **two user approvals** required. Everything else runs autonomously.
 ## Requirements
 
 **Email (at least one):**
-- [`gog`](https://github.com/neilotoole/sq) — Gmail / Google Workspace
+- [`gog`](https://gogcli.sh) — Gmail / Google Workspace
 - [`himalaya`](https://github.com/soywod/himalaya) — any IMAP/SMTP mailbox
 
 **Calendar (optional, for smarter slot generation):**

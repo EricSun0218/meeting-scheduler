@@ -42,12 +42,14 @@ def check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids=None,
     No subject filtering — LLM will decide if emails are meeting-related.
     Falls back to last_sent_at if since_str not provided.
     """
-    cutoff = parse_iso(since_str) or parse_iso(last_sent_at_str)
-    last_utc = cutoff.astimezone(timezone.utc) if cutoff else None
     processed_ids = processed_ids or []
 
-    # Use Gmail after: filter to reduce API results to genuinely new emails
-    after_ts = int(last_utc.timestamp()) if last_utc else None
+    # Always use last_sent_at as the after: cutoff.
+    # Cron is created before emails are sent, so all replies are guaranteed
+    # to arrive after last_sent_at. Deduplication is handled by processed_message_ids.
+    sent_utc = parse_iso(last_sent_at_str)
+    sent_utc = sent_utc.astimezone(timezone.utc) if sent_utc else None
+    after_ts = int(sent_utc.timestamp()) if sent_utc else None
     query = f'from:{participant_email}'
     if after_ts:
         query += f' after:{after_ts}'
@@ -78,14 +80,6 @@ def check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids=None,
         if organizer and organizer in from_field:
             log(f"  msg from={from_field} → SKIP (organizer)")
             continue
-        msg_date = parse_date_flexible(msg.get("date", ""))
-        if msg_date is None:
-            log(f"  msg from={from_field}, date={msg.get('date', '')} → SKIP (date parse failed)")
-            continue
-        msg_utc = msg_date.astimezone(timezone.utc)
-        if last_utc and msg_utc <= last_utc:
-            log(f"  msg from={from_field}, msg_utc={msg_utc.isoformat()} <= last_utc → SKIP (old)")
-            continue
         log(f"  msg from={from_field}, subject={msg.get('subject', '')} → NEW (LLM will judge relevance)")
         new_messages.append({
             "message_id": msg_id,
@@ -99,12 +93,11 @@ def check_thread_gog(thread_id, last_sent_at_str, organizer, processed_ids=None,
 
 
 def check_thread_himalaya(participant_email, subject, last_sent_at_str, organizer, processed_ids=None, since_str=None):
-    """Fetch new emails from participant since `since_str` (last_polled_at) via himalaya.
-    No subject filtering — LLM will decide if emails are meeting-related.
-    Falls back to last_sent_at if since_str not provided.
+    """Fetch new emails from participant since last_sent_at via himalaya.
+    Cron is created before emails are sent, so all replies arrive after last_sent_at.
+    Deduplication is handled by processed_message_ids.
     """
-    cutoff = parse_iso(since_str) or parse_iso(last_sent_at_str)
-    last_sent = cutoff
+    last_sent = parse_iso(last_sent_at_str)
     # Fetch all emails from this participant, no subject filter
     cmd = ["himalaya", "envelope", "list", "--query", f"FROM {participant_email}", "--output", "json"]
     log(f"  himalaya command: {' '.join(cmd)}")
@@ -140,10 +133,7 @@ def check_thread_himalaya(participant_email, subject, last_sent_at_str, organize
         if msg_date is None:
             log(f"  env from={from_field}, date={env.get('date', '')} → SKIP (date parse failed)")
             continue
-        msg_utc = msg_date.astimezone(timezone.utc)
-        if last_utc and msg_utc <= last_utc:
-            log(f"  env from={from_field}, msg_utc={msg_utc.isoformat()} <= last_utc → SKIP (old)")
-            continue
+
         env_subject = env.get("subject", "")
         log(f"  env from={from_field}, subject={env_subject} → NEW (LLM will judge relevance)")
         new_messages.append({
@@ -245,6 +235,11 @@ def output_result(meeting_id, action, reason, new_replies=None, reminders_due=No
         "pending_replies": pending,
         "all_pending_replied": len(pending) == 0,
     }
+    # When action is "none", print nothing — the cron agent must output nothing
+    # and stop. Printing any output (including JSON) gives the agent content to
+    # summarise, which gets delivered to the user as noise.
+    if action == "none":
+        return
     print("---JSON---")
     print(json.dumps(result))
 

@@ -22,11 +22,11 @@ Output (JSON):
   }
 """
 import json
-import re
 import sys
 import argparse
 from datetime import datetime, timezone
-from pathlib import Path
+
+from date_utils import parse_iso
 
 # Cost values per availability response
 COST = {
@@ -50,38 +50,69 @@ def load_state(path):
 
 def _parse_slot(s):
     """Parse an ISO slot string to a UTC datetime for comparison."""
-    if not s:
-        return None
-    try:
-        s = s.replace("Z", "+00:00")
-        s = re.sub(r'T(\d{2}:\d{2})([+-])', r'T\1:00\2', s)
-        return datetime.fromisoformat(s).astimezone(timezone.utc)
-    except Exception:
-        return None
+    dt = parse_iso(s)
+    return dt.astimezone(timezone.utc) if dt else None
+
+
+def _build_slot_set(slot_list):
+    """Pre-parse a list of slot strings into a set of UTC datetimes for O(1) lookup.
+    Non-parseable slots are stored as their original string.
+    """
+    result = set()
+    for s in slot_list:
+        dt = _parse_slot(s)
+        result.add(dt if dt is not None else s)
+    return result
 
 
 def _slot_in_list(slot, slot_list):
-    """Check if a slot matches any in the list (timezone-aware comparison)."""
+    """Check if a slot matches any in the list (timezone-aware comparison).
+    Falls back to string comparison for non-ISO slot labels.
+    """
     target = _parse_slot(slot)
     if target is None:
         return slot in slot_list
     return any(_parse_slot(s) == target for s in slot_list)
 
 
-def get_participant_availability(participants, slot):
-    """Return availability label for each participant for a given slot."""
+def _lookup_slot(slot, slot_set):
+    """Check if a slot is in a pre-built set. Handles both parsed and string slots."""
+    target = _parse_slot(slot)
+    if target is not None:
+        return target in slot_set
+    return slot in slot_set
+
+
+def get_participant_availability(participants, slot, participant_sets=None):
+    """Return availability label for each participant for a given slot.
+    If participant_sets is provided, use pre-parsed sets for O(1) lookup.
+    """
     result = {}
     for email, data in participants.items():
-        if _slot_in_list(slot, data.get("available_slots", [])):
-            result[email] = "yes"
-        elif _slot_in_list(slot, data.get("hard_no_slots", [])):
-            result[email] = "hard_no"
-        elif _slot_in_list(slot, data.get("maybe_slots", [])):
-            result[email] = "maybe"
-        elif _slot_in_list(slot, data.get("soft_no_slots", [])):
-            result[email] = "no"
+        if participant_sets and email in participant_sets:
+            sets = participant_sets[email]
+            if _lookup_slot(slot, sets["available"]):
+                result[email] = "yes"
+            elif _lookup_slot(slot, sets["hard_no"]):
+                result[email] = "hard_no"
+            elif _lookup_slot(slot, sets["maybe"]):
+                result[email] = "maybe"
+            elif _lookup_slot(slot, sets["soft_no"]):
+                result[email] = "no"
+            else:
+                result[email] = "unknown"
         else:
-            result[email] = "unknown"
+            # Fallback: parse on the fly
+            if _lookup_slot(slot, _build_slot_set(data.get("available_slots", []))):
+                result[email] = "yes"
+            elif _lookup_slot(slot, _build_slot_set(data.get("hard_no_slots", []))):
+                result[email] = "hard_no"
+            elif _lookup_slot(slot, _build_slot_set(data.get("maybe_slots", []))):
+                result[email] = "maybe"
+            elif _lookup_slot(slot, _build_slot_set(data.get("soft_no_slots", []))):
+                result[email] = "no"
+            else:
+                result[email] = "unknown"
     return result
 
 
@@ -146,10 +177,20 @@ def compute(state):
             "deadlock_reason": "all_slots_exhausted",
         }
 
+    # Pre-parse all participant slot lists once for O(1) lookup
+    participant_sets = {}
+    for email, data in active_participants.items():
+        participant_sets[email] = {
+            "available": _build_slot_set(data.get("available_slots", [])),
+            "hard_no": _build_slot_set(data.get("hard_no_slots", [])),
+            "maybe": _build_slot_set(data.get("maybe_slots", [])),
+            "soft_no": _build_slot_set(data.get("soft_no_slots", [])),
+        }
+
     def score_all(slots):
         results = []
         for slot in slots:
-            avail_map = get_participant_availability(active_participants, slot)
+            avail_map = get_participant_availability(active_participants, slot, participant_sets)
             cost, breakdown = score_slot(avail_map)
             hard_nos = [e for e, lbl in avail_map.items() if lbl == "hard_no"]
             results.append({
@@ -165,8 +206,8 @@ def compute(state):
     # Exclude any slot that has at least one hard_no
     def has_hard_no(slot):
         return any(
-            _slot_in_list(slot, p.get("hard_no_slots", []))
-            for p in active_participants.values()
+            _lookup_slot(slot, participant_sets[email]["hard_no"])
+            for email in active_participants
         )
 
     eligible_slots = [s for s in proposed_slots if not has_hard_no(s)]
@@ -192,7 +233,7 @@ def compute(state):
     # Perfect: no hard_nos, cost == 0, AND all active participants explicitly replied
     all_replied = all(
         v != "unknown"
-        for v in get_participant_availability(active_participants, best["slot"]).values()
+        for v in get_participant_availability(active_participants, best["slot"], participant_sets).values()
     )
     perfect = (
         not all_have_hard_no
