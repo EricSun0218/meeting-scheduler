@@ -68,11 +68,13 @@ Read from the inbound message metadata (available in system context). Examples:
 - WhatsApp → `notify_channel: "whatsapp"`, `notify_target: "<e164_number>"`
 - webchat/CLI → leave both empty (main session will reply inline)
 
-Store immediately after creating the meeting state:
+Pass directly to the create command — do NOT use a separate update step:
 ```bash
-python3 <skill_dir>/scripts/meeting_state.py update <id> \
-  '{"notify_channel": "<channel>", "notify_target": "<target>"}'
+python3 <skill_dir>/scripts/meeting_state.py create "<subject>" \
+  --notify-channel "<channel>" \
+  --notify-target "<target>"
 ```
+These are written atomically at creation time. No separate update needed.
 
 **Slot generation rules:**
 ```

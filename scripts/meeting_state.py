@@ -54,7 +54,7 @@ def save(meeting_id, state):
         raise
 
 
-def create(subject):
+def create(subject, notify_channel="", notify_target=""):
     ensure_dir()
     meeting_id = uuid.uuid4().hex[:8]
     state = {
@@ -78,7 +78,9 @@ def create(subject):
         "pending_replies": [],
         "participants": {},
         "final_agreed_slot": None,
-        "confirmed_at": None
+        "confirmed_at": None,
+        "notify_channel": notify_channel,
+        "notify_target": notify_target,
     }
     save(meeting_id, state)
     print(meeting_id)
@@ -146,7 +148,23 @@ if __name__ == "__main__":
 
     cmd = args[0]
     if cmd == "create" and len(args) >= 2:
-        create(" ".join(args[1:]))
+        # Parse optional --notify-channel and --notify-target flags
+        remaining = args[1:]
+        notify_channel = ""
+        notify_target = ""
+        subject_parts = []
+        i = 0
+        while i < len(remaining):
+            if remaining[i] == "--notify-channel" and i + 1 < len(remaining):
+                notify_channel = remaining[i + 1]
+                i += 2
+            elif remaining[i] == "--notify-target" and i + 1 < len(remaining):
+                notify_target = remaining[i + 1]
+                i += 2
+            else:
+                subject_parts.append(remaining[i])
+                i += 1
+        create(" ".join(subject_parts), notify_channel=notify_channel, notify_target=notify_target)
     elif cmd == "get" and len(args) == 2:
         get(args[1])
     elif cmd == "update" and len(args) == 3:
