@@ -1,6 +1,6 @@
 ---
 name: meeting-scheduler
-description: Schedule multi-person meetings via email with automated negotiation. Detects available email tools, collects meeting details from user, sends invites, and autonomously handles multi-round per-participant time negotiation via background scheduled task. Final confirmation is sent as an email with a .ics (iCalendar) attachment — works universally across Gmail, Outlook, Apple Mail, QQ Mail, and any calendar client. Only pauses for user approval twice: before sending first invites, and before sending final confirmation. Use when user says things like "help me schedule a meeting", "约个会议", "help me find a time with multiple people", "coordinate a meeting", "set up a call with", "安排一个会议".
+description: "Schedule multi-person meetings via email with automated negotiation. Detects available email tools, collects meeting details from user, sends invites, and autonomously handles multi-round per-participant time negotiation via background scheduled task. Final confirmation is sent as an email with a .ics (iCalendar) attachment — works universally across Gmail, Outlook, Apple Mail, QQ Mail, and any calendar client. Only pauses for user approval twice: before sending first invites, and before sending final confirmation. Use when user says things like 'help me schedule a meeting', '约个会议', 'help me find a time with multiple people', 'coordinate a meeting', 'set up a call with', '安排一个会议'."
 ---
 
 # Meeting Scheduler
